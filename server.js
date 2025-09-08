@@ -36,6 +36,10 @@ app.use('/api/mentor', mentorRoutes);
 app.use('/api/student', studentRoutes);
 app.use('/api/contact', contactRoutes);
 
+// Health check / root route
+app.get("/", (req, res) => {
+  res.send("Backend is running ✅");
+});
 
 // Error handling middleware
 app.use((err, req, res, next) => {
@@ -46,7 +50,6 @@ app.use((err, req, res, next) => {
   });
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+// ❌ Do not use app.listen on Vercel
+// ✅ Export app for Vercel
+module.exports = app;
