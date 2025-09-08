@@ -17,7 +17,10 @@ const contactRoutes = require('./routes/contact');
 const app = express();
 
 // Middleware
-app.use(cors());
+app.use(cors({
+  origin: 'https://sajre-frontend.vercel.app',
+  credentials: true,
+}));
 app.use(express.json());
 
 // Database connection
