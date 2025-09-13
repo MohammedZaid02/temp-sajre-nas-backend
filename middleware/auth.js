@@ -31,17 +31,33 @@ const protect = async (req, res, next) => {
     });
 
     if (admin) {
-      // It's an admin user
-      if (!admin.isActive) {
+      // Admin found, now find the corresponding User
+      const user = await prisma.user.findUnique({
+        where: { email: admin.email },
+      });
+
+      if (!user) {
         return res.status(401).json({
           success: false,
-          message: 'Admin account is not active'
+          message: 'Not authorized, admin user mapping not found'
+        });
+      }
+
+      if (user.role !== 'ADMIN') {
+        return res.status(403).json({
+          success: false,
+          message: 'Forbidden, user is not an admin'
         });
       }
       
-      // Add role to admin object for consistency
-      admin.role = 'ADMIN';
-      req.user = admin;
+      if (!user.isActive) {
+        return res.status(401).json({
+          success: false,
+          message: 'Account is not active'
+        });
+      }
+
+      req.user = user;
       next();
       return;
     }
