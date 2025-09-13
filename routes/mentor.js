@@ -16,7 +16,7 @@ const router = express.Router();
 
 // Apply authentication and mentor authorization to all routes
 router.use(protect);
-router.use(authorize('mentor'));
+router.use(authorize('MENTOR'));
 
 router.get('/dashboard', getDashboard);
 router.post('/create-referral-code', createReferralCode);

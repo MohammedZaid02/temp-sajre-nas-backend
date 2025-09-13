@@ -1,9 +1,6 @@
 const jwt = require('jsonwebtoken');
-const User = require('../models/user');
-const Vendor = require('../models/vendor');
-const Mentor = require('../models/mentor');
-const Student = require('../models/student');
-const ReferralCode = require('../models/referralcode');
+const prisma = require('../config/database');
+const bcrypt = require('bcryptjs');
 const { createAndSendOTP, verifyOTP } = require('../utils/otpService');
 
 // Generate JWT Token
@@ -13,39 +10,15 @@ const generateToken = (id) => {
   });
 };
 
-// @desc    Register vendor with vendor key
+// @desc    Register vendor with or without vendor key
 // @route   POST /api/auth/register/vendor
 // @access  Public
 const registerVendor = async (req, res) => {
   try {
     const { name, email, password, phone, vendorKey } = req.body;
 
-    // Check if vendor key exists and is not expired
-    const vendor = await Vendor.findOne({ vendorKey });
-
-    if (!vendor) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid vendor key'
-      });
-    }
-
-    if (vendor.userId) {
-      return res.status(400).json({
-        success: false,
-        message: 'Vendor account already exists for this key'
-      });
-    }
-
-    if (vendor.expiresAt < new Date()) {
-      return res.status(400).json({
-        success: false,
-        message: 'Vendor key has expired'
-      });
-    }
-
     // Check if email already exists
-    const existingUser = await User.findOne({ email });
+    const existingUser = await prisma.user.findUnique({ where: { email } });
     if (existingUser) {
       return res.status(400).json({
         success: false,
@@ -53,26 +26,99 @@ const registerVendor = async (req, res) => {
       });
     }
 
+    // Hash password
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(password, salt);
+
     // Create user
-    const user = await User.create({
-      name,
-      email,
-      password,
-      phone,
-      role: 'vendor'
+    const user = await prisma.user.create({
+      data: {
+        name,
+        email,
+        password: hashedPassword,
+        phone,
+        role: 'VENDOR'
+      }
     });
 
-    // Update vendor with userId
-    vendor.userId = user._id;
-    await vendor.save();
+    let vendor;
+    let status = 'PENDING';
+    let message = 'Vendor registered successfully. Please verify your email with OTP. Your account is pending admin approval.';
+
+    if (vendorKey) {
+      // Check if vendor key exists and is not expired
+      vendor = await prisma.vendor.findUnique({ where: { vendorKey } });
+
+      if (vendor && !vendor.userId && (!vendor.expiresAt || vendor.expiresAt > new Date())) {
+        // Valid vendor key - auto approve
+        status = 'APPROVED';
+        message = 'Vendor registered successfully with valid key. Please verify your email with OTP.';
+        
+        // Update existing vendor with userId
+        vendor = await prisma.vendor.update({
+          where: { id: vendor.id },
+          data: { 
+            userId: user.id,
+            status: 'APPROVED',
+            approvedBy: 'SYSTEM',
+            approvedAt: new Date()
+          }
+        });
+      } else {
+        // Invalid or expired vendor key - create new vendor record
+        const { generateVendorKey } = require('../utils/generatekeys');
+        let newVendorKey;
+        let keyExists = true;
+
+        while (keyExists) {
+          newVendorKey = generateVendorKey();
+          const existingVendor = await prisma.vendor.findFirst({ where: { vendorKey: newVendorKey } });
+          keyExists = !!existingVendor;
+        }
+
+        vendor = await prisma.vendor.create({
+          data: {
+            vendorKey: newVendorKey,
+            companyName: `${name}'s Company`,
+            description: 'Self-registered vendor',
+            createdBy: user.id, // Self-created
+            userId: user.id,
+            status: 'PENDING'
+          }
+        });
+      }
+    } else {
+      // No vendor key provided - create new vendor record for approval
+      const { generateVendorKey } = require('../utils/generatekeys');
+      let newVendorKey;
+      let keyExists = true;
+
+      while (keyExists) {
+        newVendorKey = generateVendorKey();
+        const existingVendor = await prisma.vendor.findFirst({ where: { vendorKey: newVendorKey } });
+        keyExists = !!existingVendor;
+      }
+
+      vendor = await prisma.vendor.create({
+        data: {
+          vendorKey: newVendorKey,
+          companyName: `${name}'s Company`,
+          description: 'Self-registered vendor',
+          createdBy: user.id, // Self-created
+          userId: user.id,
+          status: 'PENDING'
+        }
+      });
+    }
 
     // Send OTP for email verification
-    await createAndSendOTP(email, 'registration');
+    await createAndSendOTP(email, 'REGISTRATION');
 
     res.status(201).json({
       success: true,
-      message: 'Vendor registered successfully. Please verify your email with OTP.',
-      userId: user._id
+      message,
+      userId: user.id,
+      vendorStatus: status
     });
 
   } catch (error) {
@@ -83,32 +129,15 @@ const registerVendor = async (req, res) => {
   }
 };
 
-// @desc    Register mentor with mentor key
+// @desc    Register mentor with or without mentor key
 // @route   POST /api/auth/register/mentor
 // @access  Public
 const registerMentor = async (req, res) => {
   try {
     const { name, email, password, phone, mentorKey, specialization, bio } = req.body;
 
-    // Check if mentor key exists
-    const mentor = await Mentor.findOne({ mentorKey });
-    if (!mentor) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid mentor key'
-      });
-    }
-
-    // Check if mentor already has a user account
-    if (mentor.userId) {
-      return res.status(400).json({
-        success: false,
-        message: 'Mentor account already exists for this key'
-      });
-    }
-
     // Check if email already exists
-    const existingUser = await User.findOne({ email });
+    const existingUser = await prisma.user.findUnique({ where: { email } });
     if (existingUser) {
       return res.status(400).json({
         success: false,
@@ -116,28 +145,157 @@ const registerMentor = async (req, res) => {
       });
     }
 
+    // Hash password
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(password, salt);
+
     // Create user
-    const user = await User.create({
-      name,
-      email,
-      password,
-      phone,
-      role: 'mentor'
+    const user = await prisma.user.create({
+      data: {
+        name,
+        email,
+        password: hashedPassword,
+        phone,
+        role: 'MENTOR'
+      }
     });
 
-    // Update mentor with userId
-    mentor.userId = user._id;
-    mentor.specialization = specialization;
-    mentor.bio = bio;
-    await mentor.save();
+    let mentor;
+    let status = 'PENDING';
+    let message = 'Mentor registered successfully. Please verify your email with OTP. Your account is pending vendor approval.';
+
+    if (mentorKey) {
+      // Check if mentor key exists
+      mentor = await prisma.mentor.findUnique({ where: { mentorKey } });
+      
+      if (mentor && !mentor.userId) {
+        // Valid mentor key - auto approve
+        status = 'APPROVED';
+        message = 'Mentor registered successfully with valid key. Please verify your email with OTP.';
+        
+        // Update existing mentor with userId
+        mentor = await prisma.mentor.update({
+          where: { id: mentor.id },
+          data: {
+            userId: user.id,
+            specialization,
+            bio,
+            status: 'APPROVED',
+            approvedBy: 'SYSTEM',
+            approvedAt: new Date()
+          }
+        });
+      } else {
+        // Invalid mentor key - create new mentor record
+        const { generateMentorKey } = require('../utils/generatekeys');
+        let newMentorKey;
+        let keyExists = true;
+
+        while (keyExists) {
+          newMentorKey = generateMentorKey();
+          const existingMentor = await prisma.mentor.findFirst({ where: { mentorKey: newMentorKey } });
+          keyExists = !!existingMentor;
+        }
+
+        // Find a default vendor or create one
+        let defaultVendor = await prisma.vendor.findFirst({ where: { status: 'APPROVED' } });
+        if (!defaultVendor) {
+          // Create a default vendor for self-registered mentors
+          const { generateVendorKey } = require('../utils/generatekeys');
+          let vendorKey;
+          let vendorKeyExists = true;
+
+          while (vendorKeyExists) {
+            vendorKey = generateVendorKey();
+            const existingVendor = await prisma.vendor.findFirst({ where: { vendorKey } });
+            vendorKeyExists = !!existingVendor;
+          }
+
+          defaultVendor = await prisma.vendor.create({
+            data: {
+              vendorKey,
+              companyName: 'Default Company',
+              description: 'Default vendor for self-registered mentors',
+              createdBy: user.id,
+              status: 'APPROVED',
+              approvedBy: 'SYSTEM',
+              approvedAt: new Date()
+            }
+          });
+        }
+
+        mentor = await prisma.mentor.create({
+          data: {
+            mentorKey: newMentorKey,
+            vendorId: defaultVendor.id,
+            createdBy: user.id,
+            userId: user.id,
+            specialization,
+            bio,
+            status: 'PENDING'
+          }
+        });
+      }
+    } else {
+      // No mentor key provided - create new mentor record for approval
+      const { generateMentorKey } = require('../utils/generatekeys');
+      let newMentorKey;
+      let keyExists = true;
+
+      while (keyExists) {
+        newMentorKey = generateMentorKey();
+        const existingMentor = await prisma.mentor.findFirst({ where: { mentorKey: newMentorKey } });
+        keyExists = !!existingMentor;
+      }
+
+      // Find a default vendor or create one
+      let defaultVendor = await prisma.vendor.findFirst({ where: { status: 'APPROVED' } });
+      if (!defaultVendor) {
+        // Create a default vendor for self-registered mentors
+        const { generateVendorKey } = require('../utils/generatekeys');
+        let vendorKey;
+        let vendorKeyExists = true;
+
+        while (vendorKeyExists) {
+          vendorKey = generateVendorKey();
+          const existingVendor = await prisma.vendor.findFirst({ where: { vendorKey } });
+          vendorKeyExists = !!existingVendor;
+        }
+
+        defaultVendor = await prisma.vendor.create({
+          data: {
+            vendorKey,
+            companyName: 'Default Company',
+            description: 'Default vendor for self-registered mentors',
+            createdBy: user.id,
+            status: 'APPROVED',
+            approvedBy: 'SYSTEM',
+            approvedAt: new Date()
+          }
+        });
+      }
+
+      mentor = await prisma.mentor.create({
+        data: {
+          mentorKey: newMentorKey,
+          vendorId: defaultVendor.id,
+          createdBy: user.id,
+          userId: user.id,
+          specialization,
+          bio,
+          status: 'PENDING'
+        }
+      });
+    }
 
     // Send OTP for email verification
-    await createAndSendOTP(email, 'registration');
+    await createAndSendOTP(email, 'REGISTRATION');
 
     res.status(201).json({
       success: true,
-      message: 'Mentor registered successfully. Please verify your email with OTP.',
-      userId: user._id
+      message,
+      userId: user.id,
+      mentorStatus: status
     });
 
   } catch (error) {
@@ -156,11 +314,13 @@ const registerStudent = async (req, res) => {
     const { name, email, password, phone, referralCode } = req.body;
 
     // Check if referral code exists and is active
-    const referral = await ReferralCode.findOne({ 
-      code: referralCode, 
-      isActive: true 
+    const referral = await prisma.referralCode.findFirst({
+      where: {
+        code: referralCode,
+        isActive: true
+      }
     });
-    
+
     if (!referral) {
       return res.status(400).json({
         success: false,
@@ -169,7 +329,7 @@ const registerStudent = async (req, res) => {
     }
 
     // Check if email already exists
-    const existingUser = await User.findOne({ email });
+    const existingUser = await prisma.user.findUnique({ where: { email } });
     if (existingUser) {
       return res.status(400).json({
         success: false,
@@ -177,33 +337,43 @@ const registerStudent = async (req, res) => {
       });
     }
 
+    // Hash password
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(password, salt);
+
     // Create user
-    const user = await User.create({
-      name,
-      email,
-      password,
-      phone,
-      role: 'student'
+    const user = await prisma.user.create({
+      data: {
+        name,
+        email,
+        password: hashedPassword,
+        phone,
+        role: 'STUDENT'
+      }
     });
 
     // Create student record
-    const student = await Student.create({
-      userId: user._id,
-      mentorId: referral.mentorId,
-      referralCode: referralCode
+    await prisma.student.create({
+      data: {
+        userId: user.id,
+        mentorId: referral.mentorId,
+        referralCode: referralCode
+      }
     });
 
     // Update referral code usage
-    referral.usageCount += 1;
-    await referral.save();
+    await prisma.referralCode.update({
+      where: { id: referral.id },
+      data: { usageCount: { increment: 1 } }
+    });
 
     // Send OTP for email verification
-    await createAndSendOTP(email, 'registration');
+    await createAndSendOTP(email, 'REGISTRATION');
 
     res.status(201).json({
       success: true,
       message: 'Student registered successfully. Please verify your email with OTP.',
-      userId: user._id
+      userId: user.id
     });
 
   } catch (error) {
@@ -222,14 +392,14 @@ const verifyOTPAndActivate = async (req, res) => {
     const { email, otp } = req.body;
 
     // Verify OTP
-    const otpResult = await verifyOTP(email, otp, 'registration');
-    
+    const otpResult = await verifyOTP(email, otp, 'REGISTRATION');
+
     if (!otpResult.success) {
       return res.status(400).json(otpResult);
     }
 
     // Find and activate user
-    const user = await User.findOne({ email });
+    const user = await prisma.user.findUnique({ where: { email } });
     if (!user) {
       return res.status(400).json({
         success: false,
@@ -237,19 +407,20 @@ const verifyOTPAndActivate = async (req, res) => {
       });
     }
 
-    user.isActive = true;
-    user.isEmailVerified = true;
-    await user.save();
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { isActive: true, isEmailVerified: true }
+    });
 
     // Generate token
-    const token = generateToken(user._id);
+    const token = generateToken(user.id);
 
     res.status(200).json({
       success: true,
       message: 'Email verified successfully',
       token,
       user: {
-        id: user._id,
+        id: user.id,
         name: user.name,
         email: user.email,
         role: user.role
@@ -272,44 +443,61 @@ const login = async (req, res) => {
     const { email, password } = req.body;
     const bcrypt = require('bcryptjs');
 
-    // Check if this is admin login first
-    if (email === process.env.ADMIN_EMAIL && password === process.env.ADMIN_PASSWORD) {
-      // Find or create admin user
-      let admin = await User.findOne({ email, role: 'admin' });
-      
-      if (!admin) {
-        // Create admin user if doesn't exist
-        const salt = await bcrypt.genSalt(10);
-        const hashedPassword = await bcrypt.hash(password, salt);
-        
-        admin = await User.create({
-          name: 'Platform Admin',
-          email,
-          password: hashedPassword,
-          role: 'admin',
-          isActive: true,
-          isEmailVerified: true
+    // Check if this is admin login first - check Admin table
+    const admin = await prisma.admin.findUnique({ 
+      where: { email },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        password: true,
+        isActive: true,
+        isEmailVerified: true
+      }
+    });
+
+    if (admin) {
+      // Check if admin is active
+      if (!admin.isActive) {
+        return res.status(401).json({
+          success: false,
+          message: 'Admin account is not active'
         });
       }
 
+      // Check password
+      const isMatch = await bcrypt.compare(password, admin.password);
+      if (!isMatch) {
+        return res.status(401).json({
+          success: false,
+          message: 'Invalid credentials'
+        });
+      }
+
+      // Update last login time
+      await prisma.admin.update({
+        where: { id: admin.id },
+        data: { lastLoginAt: new Date() }
+      });
+
       // Generate token
-      const token = generateToken(admin._id);
+      const token = generateToken(admin.id);
 
       return res.status(200).json({
         success: true,
         message: 'Admin login successful',
         token,
         user: {
-          id: admin._id,
+          id: admin.id,
           name: admin.name,
           email: admin.email,
-          role: admin.role
+          role: 'ADMIN'
         }
       });
     }
 
     // Check if user exists
-    const user = await User.findOne({ email });
+    const user = await prisma.user.findUnique({ where: { email } });
     if (!user) {
       return res.status(401).json({
         success: false,
@@ -326,7 +514,7 @@ const login = async (req, res) => {
     }
 
     // Check password
-    const isMatch = await user.matchPassword(password);
+    const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
       return res.status(401).json({
         success: false,
@@ -335,17 +523,17 @@ const login = async (req, res) => {
     }
 
     // Generate token
-    const token = generateToken(user._id);
+    const token = generateToken(user.id);
 
     // For students, add isEnrolled status to the response
-    if (user.role === 'student') {
-      const student = await Student.findOne({ userId: user._id });
+    if (user.role === 'STUDENT') {
+      const student = await prisma.student.findUnique({ where: { userId: user.id } });
       return res.status(200).json({
         success: true,
         message: 'Login successful',
         token,
         user: {
-          id: user._id,
+          id: user.id,
           name: user.name,
           email: user.email,
           role: user.role,
@@ -359,7 +547,7 @@ const login = async (req, res) => {
       message: 'Login successful',
       token,
       user: {
-        id: user._id,
+        id: user.id,
         name: user.name,
         email: user.email,
         role: user.role
@@ -381,34 +569,3 @@ module.exports = {
   verifyOTPAndActivate,
   login
 };
-
-// Dev-only: force activate a user (protected by ADMIN_PASSWORD). Not for production use.
-const forceActivate = async (req, res) => {
-  try {
-    const { email, adminPassword } = req.body;
-
-    if (process.env.NODE_ENV === 'production') {
-      return res.status(403).json({ success: false, message: 'Forbidden in production' });
-    }
-
-    if (adminPassword !== process.env.ADMIN_PASSWORD) {
-      return res.status(401).json({ success: false, message: 'Invalid admin password' });
-    }
-
-    const user = await User.findOne({ email });
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found' });
-    }
-
-    user.isActive = true;
-    user.isEmailVerified = true;
-    await user.save();
-
-    return res.status(200).json({ success: true, message: 'User activated', userId: user._id });
-  } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
-  }
-};
-
-// export dev helper
-module.exports.forceActivate = forceActivate;

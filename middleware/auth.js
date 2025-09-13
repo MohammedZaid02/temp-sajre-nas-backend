@@ -1,5 +1,5 @@
 const jwt = require('jsonwebtoken');
-const User = require('../models/user');
+const prisma = require('../config/database');
 
 const protect = async (req, res, next) => {
   let token;
@@ -17,7 +17,37 @@ const protect = async (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = await User.findById(decoded.id);
+    
+    // First check if it's an admin user
+    let admin = await prisma.admin.findUnique({ 
+      where: { id: decoded.id },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        isActive: true,
+        isEmailVerified: true
+      }
+    });
+
+    if (admin) {
+      // It's an admin user
+      if (!admin.isActive) {
+        return res.status(401).json({
+          success: false,
+          message: 'Admin account is not active'
+        });
+      }
+      
+      // Add role to admin object for consistency
+      admin.role = 'ADMIN';
+      req.user = admin;
+      next();
+      return;
+    }
+
+    // If not admin, check regular user
+    req.user = await prisma.user.findUnique({ where: { id: decoded.id } });
     
     if (!req.user) {
       return res.status(401).json({

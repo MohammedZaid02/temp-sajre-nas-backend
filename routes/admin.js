@@ -4,6 +4,9 @@ const {
   getDashboard,
   createVendor,
   getAllVendors,
+  approveVendor,
+  rejectVendor,
+  suspendVendor,
   updateVendor,
   deleteVendor,
   getAllMentors,
@@ -31,13 +34,16 @@ router.post('/login', adminLogin);
 
 // Protected routes
 router.use(protect);
-router.use(authorize('admin'));
+router.use(authorize('ADMIN'));
 
 router.get('/dashboard', getDashboard);
 
 // Vendor routes
 router.post('/create-vendor', createVendor);
 router.get('/vendors', getAllVendors);
+router.put('/vendor/:id/approve', approveVendor);
+router.put('/vendor/:id/reject', rejectVendor);
+router.put('/vendor/:id/suspend', suspendVendor);
 router.put('/vendor/:id', updateVendor);
 router.delete('/vendor/:id', deleteVendor);
 

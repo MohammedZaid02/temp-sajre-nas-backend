@@ -1,22 +1,23 @@
-const OTP = require('../models/otp');
+const prisma = require('../config/database');
 const { generateOTP } = require('./generatekeys');
 const { sendOTPEmail } = require('./emailService');
 
 const createAndSendOTP = async (email, type) => {
   try {
     // Delete any existing OTPs for this email
-    await OTP.deleteMany({ email, type });
+    await prisma.otp.deleteMany({ where: { email, type } });
 
     // Generate new OTP
     const otpCode = generateOTP();
 
     // Save OTP to database
-    const otp = new OTP({
-      email,
-      otp: otpCode,
-      type
+    await prisma.otp.create({
+      data: {
+        email,
+        otp: otpCode,
+        type
+      }
     });
-    await otp.save();
 
     // Send OTP via email
     const emailSent = await sendOTPEmail(email, otpCode, type);
@@ -39,7 +40,9 @@ const createAndSendOTP = async (email, type) => {
 
 const verifyOTP = async (email, otpCode, type) => {
   try {
-    const otpRecord = await OTP.findOne({ email, type });
+    const otpRecord = await prisma.otp.findFirst({
+      where: { email, type }
+    });
 
     if (!otpRecord) {
       return {
@@ -48,7 +51,7 @@ const verifyOTP = async (email, otpCode, type) => {
       };
     }
 
-    const isMatch = await otpRecord.matchOTP(otpCode);
+    const isMatch = otpRecord.otp === otpCode;
 
     if (!isMatch) {
       return {
@@ -58,7 +61,7 @@ const verifyOTP = async (email, otpCode, type) => {
     }
 
     // Delete OTP after successful verification
-    await OTP.deleteOne({ _id: otpRecord._id });
+    await prisma.otp.delete({ where: { id: otpRecord.id } });
 
     return {
       success: true,

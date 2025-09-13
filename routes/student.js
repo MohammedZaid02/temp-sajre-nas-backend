@@ -13,7 +13,7 @@ const router = express.Router();
 
 // Apply authentication and student authorization to all routes
 router.use(protect);
-router.use(authorize('student', 'admin'));
+router.use(authorize('STUDENT', 'ADMIN'));
 
 router.get('/dashboard', getDashboard);
 router.post('/enroll/:courseId', enrollInCourse);

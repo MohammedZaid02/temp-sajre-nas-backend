@@ -1,0 +1,244 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  VENDOR
+  MENTOR
+  STUDENT
+}
+
+enum VendorStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  SUSPENDED
+}
+
+enum MentorStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  SUSPENDED
+}
+
+model User {
+  id              String    @id @default(uuid())
+  name            String
+  email           String    @unique
+  password        String
+  phone           String?
+  role            Role
+  isActive        Boolean   @default(false)
+  isEmailVerified Boolean   @default(false)
+  createdAt       DateTime  @default(now())
+  vendorsCreated  Vendor[]  @relation("CreatedVendors") // Add this for reverse relation
+  vendorUser      Vendor?   @relation("VendorUser") // Add this for reverse relation
+  mentorsCreated    Mentor[]     @relation("CreatedMentors")
+  mentorUser        Mentor?      @relation("MentorUser")
+  student           Student?     @relation("UserStudent")
+}
+
+model Vendor {
+  id          String    @id @default(uuid())
+  userId      String?   @unique
+  user        User?     @relation("VendorUser", fields: [userId], references: [id])
+  vendorKey   String    @unique
+  companyName String
+  description String?
+  createdBy   String
+  creator     User      @relation("CreatedVendors", fields: [createdBy], references: [id])
+  createdAt   DateTime  @default(now())
+  expiresAt   DateTime?
+  status      VendorStatus @default(PENDING)
+  approvedBy  String?
+  approvedAt  DateTime?
+  rejectedBy  String?
+  rejectedAt  DateTime?
+  rejectionReason String?
+  mentors     Mentor[]
+  referralCodes ReferralCode[]
+  courses     Course[]
+  enrollments Enrollment[]
+  payments    Payment[]
+}
+
+enum Level {
+  BEGINNER
+  INTERMEDIATE
+  ADVANCED
+}
+
+model Course {
+  id            String    @id @default(uuid())
+  title         String
+  description   String?
+  category      String
+  level         Level     @default(BEGINNER)
+  price         Float
+  discountPrice Float     @default(0)
+  duration      String?
+  maxStudents   Int       @default(0)
+  startDate     DateTime?
+  endDate       DateTime?
+  vendorId      String?
+  vendor        Vendor?   @relation(fields: [vendorId], references: [id])
+  isActive      Boolean   @default(true)
+  createdAt     DateTime  @default(now())
+  enrollments   Enrollment[]
+  payments      Payment[]
+  enrolledCourses EnrolledCourse[]
+}
+
+model Enrollment {
+  id                 String    @id @default(uuid())
+  studentId          String
+  student            Student   @relation(fields: [studentId], references: [id])
+  courseId           String
+  course             Course    @relation(fields: [courseId], references: [id])
+  mentorId           String
+  mentor             Mentor    @relation("MentorEnrollments", fields: [mentorId], references: [id])
+  vendorId           String
+  vendor             Vendor    @relation(fields: [vendorId], references: [id])
+  pricePaid          Float
+  enrolledAt         DateTime  @default(now())
+  referralCodeUsed   String?
+  referredByMentorId String?
+  referredByMentor   Mentor?   @relation("ReferredEnrollments", fields: [referredByMentorId], references: [id])
+}
+
+model Mentor {
+  id                 String       @id @default(uuid())
+  userId             String?      @unique
+  user               User?        @relation("MentorUser", fields: [userId], references: [id])
+  mentorKey          String       @unique
+  vendorId           String
+  vendor             Vendor       @relation(fields: [vendorId], references: [id])
+  specialization     String?
+  bio                String?
+  createdBy          String
+  creator            User         @relation("CreatedMentors", fields: [createdBy], references: [id])
+  createdAt          DateTime     @default(now())
+  status             MentorStatus @default(PENDING)
+  approvedBy         String?
+  approvedAt         DateTime?
+  rejectedBy         String?
+  rejectedAt         DateTime?
+  rejectionReason    String?
+  enrollments        Enrollment[] @relation("MentorEnrollments")
+  referredEnrollments Enrollment[] @relation("ReferredEnrollments")
+  referralCodes      ReferralCode[]
+  payments           Payment[]    @relation("MentorPayments")
+  referredPayments   Payment[]    @relation("ReferredPayments")
+  students           Student[]
+}
+
+enum OtpType {
+  REGISTRATION
+  LOGIN
+  PASSWORD_RESET
+}
+
+model Otp {
+  id        String    @id @default(uuid())
+  email     String
+  otp       String
+  type      OtpType
+  createdAt DateTime  @default(now())
+}
+
+enum PaymentMethod {
+  CARD
+  UPI
+  WALLET
+  NETBANKING
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  CANCELLED
+}
+
+model Payment {
+  id                 String        @id @default(uuid())
+  studentId          String
+  student            Student       @relation(fields: [studentId], references: [id])
+  courseId           String
+  course             Course        @relation(fields: [courseId], references: [id])
+  mentorId           String
+  mentor             Mentor        @relation("MentorPayments", fields: [mentorId], references: [id])
+  vendorId           String
+  vendor             Vendor        @relation(fields: [vendorId], references: [id])
+  amount             Float
+  paymentMethod      PaymentMethod
+  paymentStatus      PaymentStatus @default(SUCCESS)
+  transactionId      String        @unique
+  paymentGateway     String        @default("dummy")
+  paymentDetails     Json?
+  referralCodeUsed   String?
+  referredByMentorId String?
+  referredByMentor   Mentor?       @relation("ReferredPayments", fields: [referredByMentorId], references: [id])
+  paidAt             DateTime      @default(now())
+  createdAt          DateTime      @default(now())
+}
+
+model ReferralCode {
+  id          String    @id @default(uuid())
+  code        String    @unique
+  vendorId    String
+  vendor      Vendor    @relation(fields: [vendorId], references: [id])
+  mentorId    String?
+  mentor      Mentor?   @relation(fields: [mentorId], references: [id])
+  isActive    Boolean   @default(true)
+  usageCount  Int       @default(0)
+  maxUsage    Int?
+  createdAt   DateTime  @default(now())
+  expiresAt   DateTime?
+}
+
+model Student {
+  id              String           @id @default(uuid())
+  userId          String           @unique
+  user            User             @relation("UserStudent", fields: [userId], references: [id])
+  mentorId        String
+  mentor          Mentor           @relation(fields: [mentorId], references: [id])
+  referralCode    String
+  isEnrolled      Boolean          @default(false)
+  createdAt       DateTime         @default(now())
+  enrollments     Enrollment[]
+  enrolledCourses EnrolledCourse[]
+  payments        Payment[]
+}
+
+model EnrolledCourse {
+  id          String   @id @default(uuid())
+  studentId   String
+  student     Student  @relation(fields: [studentId], references: [id])
+  courseId    String
+  course      Course   @relation(fields: [courseId], references: [id])
+  enrolledAt  DateTime @default(now())
+}
+
+model Admin {
+  id              String    @id @default(uuid())
+  name            String
+  email           String    @unique
+  password        String
+  phone           String?
+  isActive        Boolean   @default(true)
+  isEmailVerified Boolean   @default(true)
+  lastLoginAt     DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+}

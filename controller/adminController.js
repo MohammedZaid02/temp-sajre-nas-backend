@@ -1,10 +1,4 @@
-const User = require('../models/user');
-const Vendor = require('../models/vendor');
-const Mentor = require('../models/mentor');
-const Student = require('../models/student');
-const Course = require('../models/course');
-const Enrollment = require('../models/enrollment');
-const ReferralCode = require('../models/referralcode');
+const prisma = require('../config/database');
 const { generateVendorKey } = require('../utils/generatekeys');
 const jwt = require('jsonwebtoken');
 
@@ -31,43 +25,60 @@ const adminLogin = async (req, res) => {
       });
     }
 
-    // Check if matches environment variables
-    if (email !== process.env.ADMIN_EMAIL || password !== process.env.ADMIN_PASSWORD) {
+    // Find admin in the Admin table
+    const admin = await prisma.admin.findUnique({ 
+      where: { email },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        password: true,
+        isActive: true,
+        isEmailVerified: true
+      }
+    });
+
+    if (!admin) {
       return res.status(401).json({
         success: false,
         message: 'Invalid credentials'
       });
     }
 
-    // Find or create admin user
-    let admin = await User.findOne({ email, role: 'admin' });
-    
-    if (!admin) {
-      // Create admin user if doesn't exist
-      const salt = await bcrypt.genSalt(10);
-      const hashedPassword = await bcrypt.hash(password, salt);
-      
-      admin = await User.create({
-        name: 'Platform Admin',
-        email,
-        password: hashedPassword,
-        role: 'admin',
-        isActive: true,
-        isEmailVerified: true
+    // Check if admin is active
+    if (!admin.isActive) {
+      return res.status(401).json({
+        success: false,
+        message: 'Admin account is not active'
       });
     }
 
+    // Check password
+    const isMatch = await bcrypt.compare(password, admin.password);
+    if (!isMatch) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid credentials'
+      });
+    }
+
+    // Update last login time
+    await prisma.admin.update({
+      where: { id: admin.id },
+      data: { lastLoginAt: new Date() }
+    });
+
     // Generate token
-    const token = generateToken(admin._id);
+    const token = generateToken(admin.id);
 
     res.status(200).json({
       success: true,
       token,
       data: {
-        id: admin._id,
+        id: admin.id,
         name: admin.name,
         email: admin.email,
-        role: admin.role
+        role: 'ADMIN'
       }
     });
   } catch (error) {
@@ -84,108 +95,94 @@ const adminLogin = async (req, res) => {
 const getDashboard = async (req, res) => {
   try {
     // Get counts
-    const totalVendors = await Vendor.countDocuments();
-    const totalMentors = await Mentor.countDocuments();
-    const totalStudents = await Student.countDocuments();
-    const totalCourses = await Course.countDocuments();
-    const totalEnrollments = await Enrollment.countDocuments();
-    
+    const totalVendors = await prisma.vendor.count();
+    const totalMentors = await prisma.mentor.count();
+    const totalStudents = await prisma.student.count();
+    const totalCourses = await prisma.course.count();
+    const totalEnrollments = await prisma.enrollment.count();
+
     // Get registered vs enrolled students
-    const registeredStudents = await Student.countDocuments({ isEnrolled: false });
-    const enrolledStudents = await Student.countDocuments({ isEnrolled: true });
+    const registeredStudents = await prisma.student.count({ where: { isEnrolled: false } });
+    const enrolledStudents = await prisma.student.count({ where: { isEnrolled: true } });
 
-    // Get recent activities
-    const recentVendors = await Vendor.find()
-      .populate('userId', 'name email createdAt')
-      .sort({ createdAt: -1 })
-      .limit(5);
+    // Get vendor status counts
+    const pendingVendors = await prisma.vendor.count({ where: { status: 'PENDING' } });
+    const approvedVendors = await prisma.vendor.count({ where: { status: 'APPROVED' } });
+    const rejectedVendors = await prisma.vendor.count({ where: { status: 'REJECTED' } });
+    const suspendedVendors = await prisma.vendor.count({ where: { status: 'SUSPENDED' } });
 
-    const recentMentors = await Mentor.find()
-      .populate('userId', 'name email')
-      .populate('vendorId', 'companyName')
-      .sort({ createdAt: -1 })
-      .limit(5);
+    // Get mentor status counts
+    const pendingMentors = await prisma.mentor.count({ where: { status: 'PENDING' } });
+    const approvedMentors = await prisma.mentor.count({ where: { status: 'APPROVED' } });
+    const rejectedMentors = await prisma.mentor.count({ where: { status: 'REJECTED' } });
+    const suspendedMentors = await prisma.mentor.count({ where: { status: 'SUSPENDED' } });
 
-    const recentStudents = await Student.find()
-      .populate('userId', 'name email')
-      .populate({
-        path: 'mentorId',
-        populate: {
-          path: 'userId',
-          select: 'name'
+    // Get recent activities with full vendor and mentor details
+    const recentVendors = await prisma.vendor.findMany({
+      take: 5,
+      orderBy: { createdAt: 'desc' },
+      include: { 
+        user: { select: { name: true, email: true, createdAt: true } },
+        _count: { select: { mentors: true } }
+      }
+    });
+
+    const recentMentors = await prisma.mentor.findMany({
+      take: 10,
+      orderBy: { createdAt: 'desc' },
+      include: {
+        user: { select: { name: true, email: true } },
+        vendor: { 
+          select: { 
+            companyName: true,
+            status: true
+          } 
         }
-      })
-      .sort({ createdAt: -1 })
-      .limit(5);
+      }
+    });
+
+    const recentStudents = await prisma.student.findMany({
+      take: 5,
+      orderBy: { createdAt: 'desc' },
+      include: {
+        user: { select: { name: true, email: true } },
+        mentor: { 
+          include: { 
+            user: { select: { name: true } },
+            vendor: { select: { companyName: true } }
+          } 
+        }
+      }
+    });
+
+    // Get vendors with their mentors for admin overview
+    const vendorsWithMentors = await prisma.vendor.findMany({
+      include: {
+        user: { select: { name: true, email: true, isActive: true, createdAt: true } },
+        creator: { select: { name: true, email: true } },
+        mentors: {
+          include: {
+            user: { select: { name: true, email: true, isActive: true } }
+          },
+          orderBy: { createdAt: 'desc' }
+        },
+        _count: { 
+          select: { 
+            mentors: true, 
+            referralCodes: true, 
+            courses: true, 
+            enrollments: true, 
+            payments: true 
+          } 
+        }
+      },
+      orderBy: { createdAt: 'desc' }
+    });
 
     // Revenue data (total)
-    const totalRevenue = await Enrollment.aggregate([
-      { $group: { _id: null, total: { $sum: '$pricePaid' } } }
-    ]);
-
-    // --- Dynamic Data for Charts (Last 4 Days) ---
-    const fourDaysAgo = new Date();
-    fourDaysAgo.setDate(fourDaysAgo.getDate() - 4);
-
-    // Daily Revenue
-    const dailyRevenue = await Enrollment.aggregate([
-      { $match: { createdAt: { $gte: fourDaysAgo } } },
-      {
-        $group: {
-          _id: { year: { $year: '$createdAt' }, month: { $month: '$createdAt' }, day: { $dayOfMonth: '$createdAt' } },
-          totalRevenue: { $sum: '$pricePaid' }
-        }
-      },
-      { $sort: { '_id.year': 1, '_id.month': 1, '_id.day': 1 } }
-    ]);
-
-    // Daily Users (all roles combined)
-    const dailyUsers = await User.aggregate([
-      { $match: { createdAt: { $gte: fourDaysAgo } } },
-      {
-        $group: {
-          _id: { year: { $year: '$createdAt' }, month: { $month: '$createdAt' }, day: { $dayOfMonth: '$createdAt' } },
-          count: { $sum: 1 }
-        }
-      },
-      { $sort: { '_id.year': 1, '_id.month': 1, '_id.day': 1 } }
-    ]);
-
-    // Daily Courses
-    const dailyCourses = await Course.aggregate([
-      { $match: { createdAt: { $gte: fourDaysAgo } } },
-      {
-        $group: {
-          _id: { year: { $year: '$createdAt' }, month: { $month: '$createdAt' }, day: { $dayOfMonth: '$createdAt' } },
-          count: { $sum: 1 }
-        }
-      },
-      { $sort: { '_id.year': 1, '_id.month': 1, '_id.day': 1 } }
-    ]);
-
-    // Format data for frontend (fill in missing days with 0)
-    const formattedAnalyticsData = [];
-    let currentDate = new Date(fourDaysAgo.getFullYear(), fourDaysAgo.getMonth(), fourDaysAgo.getDate());
-
-    for (let i = 0; i < 5; i++) { // Loop for 5 days (today + last 4 days)
-      const year = currentDate.getFullYear();
-      const month = currentDate.getMonth() + 1; // Month is 1-indexed
-      const day = currentDate.getDate();
-
-      const revenueEntry = dailyRevenue.find(item => item._id.year === year && item._id.month === month && item._id.day === day);
-      const usersEntry = dailyUsers.find(item => item._id.year === year && item._id.month === month && item._id.day === day);
-      const coursesEntry = dailyCourses.find(item => item._id.year === year && item._id.month === month && item._id.day === day);
-
-      formattedAnalyticsData.push({
-        name: `${month}/${day}`, // e.g., 09/04
-        revenue: revenueEntry ? revenueEntry.totalRevenue : 0,
-        users: usersEntry ? usersEntry.count : 0,
-        courses: coursesEntry ? coursesEntry.count : 0,
-      });
-
-      currentDate.setDate(currentDate.getDate() + 1);
-    }
-
+    const totalRevenue = await prisma.enrollment.aggregate({
+      _sum: { pricePaid: true }
+    });
 
     res.status(200).json({
       success: true,
@@ -197,15 +194,25 @@ const getDashboard = async (req, res) => {
           totalCourses,
           totalEnrollments,
           registeredStudents,
-          enrolledStudents
+          enrolledStudents,
+          // Status counts
+          pendingVendors,
+          approvedVendors,
+          rejectedVendors,
+          suspendedVendors,
+          pendingMentors,
+          approvedMentors,
+          rejectedMentors,
+          suspendedMentors
         },
         recentActivities: {
           vendors: recentVendors,
           mentors: recentMentors,
           students: recentStudents
         },
-        revenue: totalRevenue[0]?.total || 0,
-        analyticsData: formattedAnalyticsData // Add formatted analytics data
+        vendorsWithMentors,
+        revenue: totalRevenue._sum.pricePaid || 0,
+        analyticsData: [] // Placeholder for now
       }
     });
 
@@ -221,7 +228,7 @@ const getDashboard = async (req, res) => {
 const generateReferralCodeInternal = async (vendorId, maxUsage) => {
   try {
     // Check if vendor exists (optional, as it should be called after vendor creation)
-    const vendor = await Vendor.findById(vendorId);
+    const vendor = await prisma.vendor.findUnique({ where: { id: vendorId } });
     if (!vendor) {
       console.error(`Referral code generation failed: Vendor with ID ${vendorId} not found.`);
       return null;
@@ -233,15 +240,17 @@ const generateReferralCodeInternal = async (vendorId, maxUsage) => {
 
     while (codeExists) {
       referralCode = generateVendorKey(); // Using vendor key generation for simplicity
-      const existingCode = await ReferralCode.findOne({ code: referralCode });
+      const existingCode = await prisma.referralCode.findFirst({ where: { code: referralCode } });
       codeExists = !!existingCode;
     }
 
     // Create new referral code
-    const newReferralCode = await ReferralCode.create({
-      code: referralCode,
-      vendorId,
-      maxUsage
+    const newReferralCode = await prisma.referralCode.create({
+      data: {
+        code: referralCode,
+        vendorId,
+        maxUsage
+      }
     });
 
     return newReferralCode;
@@ -265,22 +274,24 @@ const createVendor = async (req, res) => {
 
     while (keyExists) {
       vendorKey = generateVendorKey();
-      const existingVendor = await Vendor.findOne({ vendorKey });
+      const existingVendor = await prisma.vendor.findFirst({ where: { vendorKey } });
       keyExists = !!existingVendor;
     }
 
     // Create vendor record (without userId initially)
-    const vendor = await Vendor.create({
-      vendorKey,
-      companyName,
-      description,
-      createdBy: req.user._id,
-      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000) // 24 hours from now
+    const vendor = await prisma.vendor.create({
+      data: {
+        vendorKey,
+        companyName,
+        description,
+        createdBy: req.user.id,
+        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000) // 24 hours from now
+      }
     });
 
     // Automatically generate a referral code for the new vendor
     const defaultMaxUsage = 10; // You can make this configurable if needed
-    const newReferralCode = await generateReferralCodeInternal(vendor._id, defaultMaxUsage);
+    const newReferralCode = await generateReferralCodeInternal(vendor.id, defaultMaxUsage);
 
     res.status(201).json({
       success: true,
@@ -307,45 +318,156 @@ const createVendor = async (req, res) => {
 // @access  Private/Admin
 const getAllVendors = async (req, res) => {
   try {
-    const vendors = await Vendor.find()
-      .populate('userId', 'name email isActive createdAt')
-      .populate('createdBy', 'name email')
-      .sort({ createdAt: -1 });
-
-    // Get mentor counts for each vendor
-    const vendorsWithCounts = await Promise.all(
-      vendors.map(async (vendor) => {
-        const mentorCount = await Mentor.countDocuments({ vendorId: vendor._id });
-        const studentCount = await Student.aggregate([
-          {
-            $lookup: {
-              from: 'mentors',
-              localField: 'mentorId',
-              foreignField: '_id',
-              as: 'mentor'
-            }
-          },
-          {
-            $match: {
-              'mentor.vendorId': vendor._id
-            }
-          },
-          {
-            $count: 'total'
-          }
-        ]);
-
-        return {
-          ...vendor.toObject(),
-          mentorCount,
-          studentCount: studentCount[0]?.total || 0
-        };
-      })
-    );
+    const vendors = await prisma.vendor.findMany({
+      include: {
+        user: { select: { name: true, email: true, isActive: true, createdAt: true } },
+        creator: { select: { name: true, email: true } },
+        _count: { 
+          select: { 
+            mentors: true, 
+            referralCodes: true, 
+            courses: true, 
+            enrollments: true, 
+            payments: true 
+          } 
+        }
+      },
+      orderBy: { createdAt: 'desc' }
+    });
 
     res.status(200).json({
       success: true,
-      data: vendorsWithCounts
+      data: vendors
+    });
+
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+};
+
+// @desc    Approve vendor
+// @route   PUT /api/admin/vendor/:id/approve
+// @access  Private/Admin
+const approveVendor = async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const vendor = await prisma.vendor.update({
+      where: { id },
+      data: {
+        status: 'APPROVED',
+        approvedBy: req.user.id,
+        approvedAt: new Date(),
+        rejectedBy: null,
+        rejectedAt: null,
+        rejectionReason: null
+      },
+      include: {
+        user: { select: { name: true, email: true } },
+        creator: { select: { name: true, email: true } }
+      }
+    });
+
+    if (!vendor) {
+      return res.status(404).json({
+        success: false,
+        message: 'Vendor not found'
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Vendor approved successfully',
+      data: vendor
+    });
+
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+};
+
+// @desc    Reject vendor
+// @route   PUT /api/admin/vendor/:id/reject
+// @access  Private/Admin
+const rejectVendor = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { rejectionReason } = req.body;
+    
+    const vendor = await prisma.vendor.update({
+      where: { id },
+      data: {
+        status: 'REJECTED',
+        rejectedBy: req.user.id,
+        rejectedAt: new Date(),
+        rejectionReason: rejectionReason || 'No reason provided',
+        approvedBy: null,
+        approvedAt: null
+      },
+      include: {
+        user: { select: { name: true, email: true } },
+        creator: { select: { name: true, email: true } }
+      }
+    });
+
+    if (!vendor) {
+      return res.status(404).json({
+        success: false,
+        message: 'Vendor not found'
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Vendor rejected successfully',
+      data: vendor
+    });
+
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+};
+
+// @desc    Suspend vendor
+// @route   PUT /api/admin/vendor/:id/suspend
+// @access  Private/Admin
+const suspendVendor = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reason } = req.body;
+    
+    const vendor = await prisma.vendor.update({
+      where: { id },
+      data: {
+        status: 'SUSPENDED',
+        rejectionReason: reason || 'Suspended by admin'
+      },
+      include: {
+        user: { select: { name: true, email: true } },
+        creator: { select: { name: true, email: true } }
+      }
+    });
+
+    if (!vendor) {
+      return res.status(404).json({
+        success: false,
+        message: 'Vendor not found'
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Vendor suspended successfully',
+      data: vendor
     });
 
   } catch (error) {
@@ -361,9 +483,9 @@ const getAllVendors = async (req, res) => {
 // @access  Private/Admin
 const updateVendor = async (req, res) => {
   try {
-    const vendor = await Vendor.findByIdAndUpdate(req.params.id, req.body, {
-      new: true,
-      runValidators: true
+    const vendor = await prisma.vendor.update({
+      where: { id: req.params.id },
+      data: req.body
     });
 
     if (!vendor) {
@@ -374,7 +496,7 @@ const updateVendor = async (req, res) => {
     }
 
     if (req.body.isActive !== undefined && vendor.userId) {
-      await User.findByIdAndUpdate(vendor.userId, { isActive: req.body.isActive });
+      await prisma.user.update({ where: { id: vendor.userId }, data: { isActive: req.body.isActive } });
     }
 
     res.status(200).json({
@@ -396,7 +518,7 @@ const updateVendor = async (req, res) => {
 // @access  Private/Admin
 const deleteVendor = async (req, res) => {
   try {
-    const vendor = await Vendor.findById(req.params.id);
+    const vendor = await prisma.vendor.findUnique({ where: { id: req.params.id } });
 
     if (!vendor) {
       return res.status(404).json({
@@ -405,14 +527,10 @@ const deleteVendor = async (req, res) => {
       });
     }
 
-    // Optional: Add logic to handle related mentors, students, courses, etc.
-    // For example, you might want to delete them or reassign them.
-    // For now, we'll just delete the vendor and their user account.
-
     if (vendor.userId) {
-      await User.findByIdAndDelete(vendor.userId);
+      await prisma.user.delete({ where: { id: vendor.userId } });
     }
-    await vendor.deleteOne();
+    await prisma.vendor.delete({ where: { id: req.params.id } });
 
     res.status(200).json({
       success: true,
@@ -432,29 +550,22 @@ const deleteVendor = async (req, res) => {
 // @access  Private/Admin
 const getAllMentors = async (req, res) => {
   try {
-    const mentors = await Mentor.find()
-      .populate('userId', 'name email isActive createdAt')
-      .populate('vendorId', 'companyName')
-      .populate('createdBy', 'name email')
-      .sort({ createdAt: -1 });
+    const mentors = await prisma.mentor.findMany({
+      include: {
+        user: { select: { name: true, email: true, isActive: true, createdAt: true } },
+        vendor: { select: { companyName: true } },
+        creator: { select: { name: true, email: true } },
+        _count: { select: { students: true, enrollments: true, referralCodes: true, payments: true } }
+      },
+      orderBy: { createdAt: 'desc' }
+    });
 
-    // Get student counts for each mentor
-    const mentorsWithCounts = await Promise.all(
-      mentors.map(async (mentor) => {
-        const studentCount = await Student.countDocuments({ mentorId: mentor._id });
-        const enrolledCount = await Student.countDocuments({ 
-          mentorId: mentor._id, 
-          isEnrolled: true 
-        });
-
-        return {
-          ...mentor.toObject(),
-          studentCount,
-          enrolledCount,
-          registeredCount: studentCount - enrolledCount
-        };
-      })
-    );
+    const mentorsWithCounts = mentors.map(mentor => ({
+      ...mentor,
+      studentCount: mentor._count.students,
+      enrolledCount: mentor._count.enrollments,
+      registeredCount: mentor._count.students - mentor._count.enrollments
+    }));
 
     res.status(200).json({
       success: true,
@@ -474,9 +585,9 @@ const getAllMentors = async (req, res) => {
 // @access  Private/Admin
 const updateMentor = async (req, res) => {
   try {
-    const mentor = await Mentor.findByIdAndUpdate(req.params.id, req.body, {
-      new: true,
-      runValidators: true
+    const mentor = await prisma.mentor.update({
+      where: { id: req.params.id },
+      data: req.body
     });
 
     if (!mentor) {
@@ -487,7 +598,7 @@ const updateMentor = async (req, res) => {
     }
 
     if (req.body.isActive !== undefined && mentor.userId) {
-      await User.findByIdAndUpdate(mentor.userId, { isActive: req.body.isActive });
+      await prisma.user.update({ where: { id: mentor.userId }, data: { isActive: req.body.isActive } });
     }
 
     res.status(200).json({
@@ -509,7 +620,7 @@ const updateMentor = async (req, res) => {
 // @access  Private/Admin
 const deleteMentor = async (req, res) => {
   try {
-    const mentor = await Mentor.findById(req.params.id);
+    const mentor = await prisma.mentor.findUnique({ where: { id: req.params.id } });
 
     if (!mentor) {
       return res.status(404).json({
@@ -519,9 +630,9 @@ const deleteMentor = async (req, res) => {
     }
 
     if (mentor.userId) {
-      await User.findByIdAndDelete(mentor.userId);
+      await prisma.user.delete({ where: { id: mentor.userId } });
     }
-    await mentor.deleteOne();
+    await prisma.mentor.delete({ where: { id: req.params.id } });
 
     res.status(200).json({
       success: true,
@@ -541,16 +652,18 @@ const deleteMentor = async (req, res) => {
 // @access  Private/Admin
 const getAllStudents = async (req, res) => {
   try {
-    const students = await Student.find()
-      .populate('userId', 'name email isActive createdAt')
-      .populate({
-        path: 'mentorId',
-        populate: [
-          { path: 'userId', select: 'name' },
-          { path: 'vendorId', select: 'companyName' }
-        ]
-      })
-      .sort({ createdAt: -1 });
+    const students = await prisma.student.findMany({
+      include: {
+        user: { select: { name: true, email: true, isActive: true, createdAt: true } },
+        mentor: {
+          include: {
+            user: { select: { name: true } },
+            vendor: { select: { companyName: true } }
+          }
+        }
+      },
+      orderBy: { createdAt: 'desc' }
+    });
 
     res.status(200).json({
       success: true,
@@ -570,9 +683,9 @@ const getAllStudents = async (req, res) => {
 // @access  Private/Admin
 const updateStudent = async (req, res) => {
   try {
-    const student = await Student.findByIdAndUpdate(req.params.id, req.body, {
-      new: true,
-      runValidators: true
+    const student = await prisma.student.update({
+      where: { id: req.params.id },
+      data: req.body
     });
 
     if (!student) {
@@ -583,7 +696,7 @@ const updateStudent = async (req, res) => {
     }
 
     if (req.body.isActive !== undefined && student.userId) {
-      await User.findByIdAndUpdate(student.userId, { isActive: req.body.isActive });
+      await prisma.user.update({ where: { id: student.userId }, data: { isActive: req.body.isActive } });
     }
 
     res.status(200).json({
@@ -605,7 +718,7 @@ const updateStudent = async (req, res) => {
 // @access  Private/Admin
 const deleteStudent = async (req, res) => {
   try {
-    const student = await Student.findById(req.params.id);
+    const student = await prisma.student.findUnique({ where: { id: req.params.id } });
 
     if (!student) {
       return res.status(404).json({
@@ -615,9 +728,9 @@ const deleteStudent = async (req, res) => {
     }
 
     if (student.userId) {
-      await User.findByIdAndDelete(student.userId);
+      await prisma.user.delete({ where: { id: student.userId } });
     }
-    await student.deleteOne();
+    await prisma.student.delete({ where: { id: req.params.id } });
 
     res.status(200).json({
       success: true,
@@ -641,7 +754,7 @@ const generateReferralCode = async (req, res) => {
     const { vendorId, maxUsage } = req.body;
 
     // Check if vendor exists
-    const vendor = await Vendor.findById(vendorId);
+    const vendor = await prisma.vendor.findUnique({ where: { id: vendorId } });
     if (!vendor) {
       return res.status(404).json({
         success: false,
@@ -679,21 +792,20 @@ const createCourse = async (req, res) => {
   try {
     const { title, description, price, discountPrice, duration, vendorId, category, level, maxStudents, startDate, endDate } = req.body;
 
-    console.log('createCourse - req.body:', req.body); // Debugging line
-    console.log('createCourse - vendorId:', vendorId); // Debugging line
-
-    const course = await Course.create({
-      title,
-      description,
-      price,
-      discountPrice,
-      duration,
-      vendorId: vendorId || null, // Set to null if not provided
-      category,
-      level,
-      maxStudents,
-      startDate,
-      endDate
+    const course = await prisma.course.create({
+      data: {
+        title,
+        description,
+        price,
+        discountPrice,
+        duration,
+        vendorId: vendorId || null,
+        category,
+        level,
+        maxStudents,
+        startDate,
+        endDate
+      }
     });
 
     res.status(201).json({
@@ -715,9 +827,10 @@ const createCourse = async (req, res) => {
 // @access  Private/Admin
 const getAllCourses = async (req, res) => {
   try {
-    const courses = await Course.find()
-      .populate('vendorId', 'companyName')
-      .sort({ createdAt: -1 });
+    const courses = await prisma.course.findMany({
+      include: { vendor: { select: { companyName: true } } },
+      orderBy: { createdAt: 'desc' }
+    });
 
     res.status(200).json({
       success: true,
@@ -737,9 +850,9 @@ const getAllCourses = async (req, res) => {
 // @access  Private/Admin
 const updateCourse = async (req, res) => {
   try {
-    const course = await Course.findByIdAndUpdate(req.params.id, req.body, {
-      new: true,
-      runValidators: true
+    const course = await prisma.course.update({
+      where: { id: req.params.id },
+      data: req.body
     });
 
     if (!course) {
@@ -768,7 +881,7 @@ const updateCourse = async (req, res) => {
 // @access  Private/Admin
 const deleteCourse = async (req, res) => {
   try {
-    const course = await Course.findById(req.params.id);
+    const course = await prisma.course.findUnique({ where: { id: req.params.id } });
 
     if (!course) {
       return res.status(404).json({
@@ -777,7 +890,7 @@ const deleteCourse = async (req, res) => {
       });
     }
 
-    await course.deleteOne();
+    await prisma.course.delete({ where: { id: req.params.id } });
 
     res.status(200).json({
       success: true,
@@ -797,7 +910,7 @@ const deleteCourse = async (req, res) => {
 // @access  Private/Admin
 const deleteEnrollment = async (req, res) => {
   try {
-    const enrollment = await Enrollment.findById(req.params.id);
+    const enrollment = await prisma.enrollment.findUnique({ where: { id: req.params.id } });
 
     if (!enrollment) {
       return res.status(404).json({
@@ -806,7 +919,7 @@ const deleteEnrollment = async (req, res) => {
       });
     }
 
-    await enrollment.deleteOne();
+    await prisma.enrollment.delete({ where: { id: req.params.id } });
 
     res.status(200).json({
       success: true,
@@ -826,9 +939,9 @@ const deleteEnrollment = async (req, res) => {
 // @access  Private/Admin
 const updateEnrollment = async (req, res) => {
   try {
-    const enrollment = await Enrollment.findByIdAndUpdate(req.params.id, req.body, {
-      new: true,
-      runValidators: true
+    const enrollment = await prisma.enrollment.update({
+      where: { id: req.params.id },
+      data: req.body
     });
 
     if (!enrollment) {
@@ -857,11 +970,14 @@ const updateEnrollment = async (req, res) => {
 // @access  Private/Admin
 const getAllEnrollments = async (req, res) => {
   try {
-    const enrollments = await Enrollment.find()
-      .populate({ path: 'studentId', populate: { path: 'userId', select: 'name email' } })
-      .populate('courseId', 'title')
-      .populate({ path: 'mentorId', populate: { path: 'userId', select: 'name' } })
-      .populate('vendorId', 'companyName');
+    const enrollments = await prisma.enrollment.findMany({
+      include: {
+        student: { include: { user: { select: { name: true, email: true } } } },
+        course: { select: { title: true } },
+        mentor: { include: { user: { select: { name: true } } } },
+        vendor: { select: { companyName: true } }
+      }
+    });
 
     res.status(200).json({
       success: true,
@@ -881,6 +997,9 @@ module.exports = {
   getDashboard,
   createVendor,
   getAllVendors,
+  approveVendor,
+  rejectVendor,
+  suspendVendor,
   updateVendor,
   deleteVendor,
   getAllMentors,

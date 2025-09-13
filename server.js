@@ -1,5 +1,7 @@
 const express = require('express');
-const mongoose = require('mongoose');
+const { PrismaClient } = require('@prisma/client');
+const prisma = new PrismaClient();
+console.log('Prisma connected');
 const cors = require('cors');
 const dotenv = require('dotenv');
 
@@ -18,18 +20,12 @@ const app = express();
 
 // Middleware
 app.use(cors({
-  origin: 'https://sajre-frontend.vercel.app',
+  origin: process.env.FRONTEND_URL || 'http://localhost:3000' ,
   credentials: true,
 }));
 app.use(express.json());
 
-// Database connection
-mongoose.connect(process.env.MONGODB_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-})
-.then(() => console.log('MongoDB connected'))
-.catch(err => console.log('MongoDB connection error:', err));
+
 
 // Routes
 app.use('/api/auth', authRoutes);
@@ -51,6 +47,10 @@ app.use((err, req, res, next) => {
     success: false, 
     message: 'Something went wrong!' 
   });
+});
+
+app.listen(process.env.PORT || 3000, () => {
+  console.log(`Server running on port ${process.env.PORT || 3000}`);
 });
 
 // ❌ Do not use app.listen on Vercel
